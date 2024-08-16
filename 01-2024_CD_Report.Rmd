@@ -1,0 +1,561 @@
+# 2024 CD Report
+
+WCHHS publishes an annual Communicable Disease Report, which displays trends, demographics, and key insights for the top 10 communicable diseases and includes spotlight sections to explain the role of public health, prevention topics, and intervention programs in Wake County.
+
+For this report, I contributed data analysis, graphics, and several tables. The graphics were produced in Microsoft Excel. The R code used to manage and tidy the data and to generate the table are shown below.
+
+We will start by going through the `import.R` script, then look through the other two scripts and the table-generating R Markdown file.
+
+## Libraries
+
+```{r 01 import.R p1, eval = FALSE}
+# Libraries
+# These commands must be run first!
+# Highlight them and press Ctrl + Enter (Cmd + Enter on Mac)
+library(tidyverse)
+library(readxl)
+```
+
+
+There are two non-standard libraries used in these scripts.
+
+1. `tidyverse`: The tidyverse is a set of packages with a common syntax and philosophy. It includes many useful packages, such as `dplyr` (which provides many data management functions) and `ggplot2` (which is used to create all graphics in this presentation).
+2. `readxl`: This package provides functions that read Microsoft Excel files.
+
+## Settings
+
+```{r 01 import.R p2, eval = FALSE}
+# Settings
+## Set the years of interest for this report here:
+years <- list(2023, 2022, 2021, 2020, 2019)
+
+# Functions
+## Function to implement year setting
+sesh_cyear <- function(x){paste0("c", x)}
+sesh_ryear <- function(x){paste0("r", x)}
+```
+
+A list of years of interest and two simple functions are created here. Note a few things:
+
+1. The lines beginning with `#`, which are comments and are not run.
+2. `<-`: The assignment arrow in the first expression, which says _define `years` to be a list with values `2023`, `2022`, ..._.
+3. `function(x){...}`: These lines assign a function with one argument (`x`) to `sesh_cyear` and `sesh_ryear`. These functions are very simple: they paste a letter (c or r) in front of the argument and output it. We'll see why this is used soon.
+
+As a note: When writing your own functions, the names are entirely up to you. However, it is best practice to avoid writing a function and giving it the same name as another function in a package you're using. I use the `sesh_` prefix to avoid overwriting any pre-existing functions, but that's my own convention.
+
+## Reading data, then saving
+
+```{r 01 import.R p3, eval = FALSE}
+## Read and save in R preferred format
+read_csv("Tables/Notifiables.csv") %>% 
+  saveRDS(file = "Tables/notifiables.rds")
+read_csv("Tables/NCNotifiables.csv") %>% 
+  saveRDS("Tables/ncnotifiables.rds")
+```
+
+These lines read a .csv file with data, then save it as a .rds file, which is a standard R format that can be read faster and more easily than spreadsheets. Notice:
+
+1. `read_csv()`: This reads the specified .csv file.
+2. `saveRDS()`: This saves the data specified as a .rds file.
+3. _Pipe_ `%>%`: The pipe is a shorthand function that takes the output of the function before it and inserts it as the first argument in the next line. Alternatively, these lines could be written:
+
+```{r 01 import.R p3alt, eval = FALSE}
+saveRDS(
+  read_csv("Tables/Notifiables.csv"),
+  file = "Tables/notifiables.rds"
+)
+saveRDS(
+  read_csv("Tables/NCNotifiables.csv"),
+  file = "Tables/ncnotifiables.rds"
+)
+```
+
+While both options perform the same task, the first is more logical. This becomes important when you want to string several steps together: the pipe allows you to order functions in the order you want to perform them rather than nesting the first step within each of the following steps.
+
+## Combining and saving data
+
+First, we define two functions to read the data we just saved. This will save a few keystrokes as we go. You'll notice there are no arguments specified, because we do not need any: we just want to have a shorthand way of saying "read the `notif` data" and "read the `ncnotif` data".
+
+```{r 01 import.R p4, eval = FALSE}
+notif <- function(){readRDS("Tables/notifiables.rds")}
+ncnotif <- function(){readRDS("Tables/ncnotifiables.rds")}
+```
+
+Next, we actually read in the data, manipulate it to make it easier to combine, combine it with other data, pivot it to be more readable again, and save it to a .csv file for use later. Look for the comments within to explain the code.
+
+```{r 01 import.R p5, eval = FALSE}
+# Join the Wake County notifiables data with the North Carolina notifiables data.
+full_join(
+  
+  # Join the Wake County counts with the Wake County rates.
+  full_join(
+    pivot_longer( ## Condense the counts by year columns.
+      notif(),    ## Read in the Wake County data.
+      cols = years %>% 
+        lapply(sesh_cyear) %>% 
+        unlist(), ## Insert a "c" before the year for count columns.
+      names_to = "cyear",
+      values_to = "cases"
+    ) %>% 
+      mutate(year = as.numeric(str_remove(cyear, "c"))), ## Remove the "c" and make the year a number.
+    
+    pivot_longer( ## Repeat, but for rates.
+      notif(),
+      cols = years %>% 
+        lapply(sesh_ryear) %>% 
+        unlist(),
+      names_to = "ryear",
+      values_to = "rate"
+    ) %>% 
+      mutate(year = as.numeric(str_remove(ryear, "r"))),
+    
+    by = join_by(disease, year) ## Merge counts/rates by disease name and year.
+  ) %>% 
+    
+    mutate(loc = "Wake County") %>% ## Specify these are Wake numbers.
+    select(c(disease, year, loc, cases, rate)), ## Delete all but five columns.
+  
+  # Join the North Carolina counts with the North Carolina rates.
+  full_join(
+    pivot_longer(
+      ncnotif(),
+      cols = years %>% 
+        lapply(sesh_cyear) %>% 
+        unlist(),
+      names_to = "cyear",
+      values_to = "cases"
+    ) %>% 
+      mutate(year = as.numeric(str_remove(cyear, "c"))),
+    
+    pivot_longer(
+      ncnotif(),
+      cols = years %>% 
+        lapply(sesh_ryear) %>% 
+        unlist(),
+      names_to = "ryear",
+      values_to = "rate"
+    ) %>% 
+      mutate(year = as.numeric(str_remove(ryear, "r"))),
+    
+    by = join_by(disease, year)
+  ) %>% 
+    
+    mutate(loc = "North Carolina") %>% 
+    select(c(disease, year, loc, cases, rate)),
+  
+  join_by(disease, year, loc, cases, rate) # Merge Wake County and NC data with these variables.
+  
+) %>% # The Wake and NC notifiables data are piped ahead here.
+      # This is the end of the first full_join.
+  
+  # Split the Wake and NC data into two columns.
+  pivot_wider(
+    id_cols = c(disease, year),
+    names_from = loc,
+    values_from = rate
+  ) %>% 
+  
+  # Save the new data to a .csv file.
+  write_csv("Products/Counts/all.csv", na = "")
+```
+
+Here are the steps performed above:
+
+1. Separately, select counts columns and rates columns from Notifiables.rds and NCNotifiables.rds.
+2. _Pivot_ them, so columns named by year become year values in a "Year" column, with new "Counts" and "Rates" columns for their data. This creates more rows than there originally were.
+3. _Join_ the counts and rates tables, so they appear in the same table.
+4. _Mutate_, or add, a location column in each, specifying whether the values apply to Wake County or North Carolina.
+5. _Join_ the Wake County and North Carolina tables, so they appear in the same table.
+6. _Pivot_ the combined table, so there are rates columns by location containing yearly values.
+7. Save the combined data as a .csv file.
+
+## Extracting and exporting demographic data from a line list
+
+The final section of the `import.R` script takes line lists (for foodborne, vaccine-preventable, vector-borne, and sexually transmitted illnesses), extracts the columns with age, sex, race, ethnicity, and ZIP code data, and exports them to a separate file for analysis later.
+
+First, we need to write a function that automates the selection of just those five columns from the data. Here, that function is `sesh_caseimport`.
+
+```{r 01 import.R p6, eval = FALSE}
+## function to automate selection of key demographic data
+sesh_caseimport <- function(x){
+  tibble(
+    age = unlist(x[str_detect(names(x), "Age")]),
+    gender = unlist(x[str_detect(names(x), "Gender")]),
+    race = unlist(x[str_detect(names(x), "Race")]),
+    hisp = unlist(x[str_detect(names(x), "Hispanic")]),
+    zip = unlist(x[str_detect(names(x), coll("ZIP",
+                                             ignore_case = TRUE))])
+  )
+```
+
+This function creates a specific kind of table (a _tibble_, which is a `tidyverse` object) with five columns, one each for the five data points we want to extract from each case. For each column, we:
+
+1. Use `str_detect()` to search the column headers, provided by `names()`, for five keywords. This ensures that if the column headers change between years or line lists, the same script will still work.
+2. _Subset_ (select) the matching column from the original dataset using `x[]` syntax.
+3. _Unlist_ the column found in the original, converting it to a standard _vector_ (column in a dataset).
+4. Name the columns something standard. Here, those names are _age_, _gender_, _race_, _hisp_, and _zip_.
+
+For the ZIP code, we use `coll()` with the `ignore_case = TRUE` option so that the script will select "ZIP Code", "Zip Code", "zip code", or any other variation.
+
+Next, we need to apply the function to several line list workbooks. For example, we do:
+
+```{r 01 import.R p7, eval = FALSE}
+## condense and save data for analysis
+read_xlsx("Tables/Foodborne.xlsx", sheet = "E Coli") %>% 
+  sesh_caseimport() %>% 
+  saveRDS(file = "Tables/fb_ecoli.rds")
+```
+
+This code:
+
+1. Reads a specific sheet (tab) of an Excel workbook.
+2. Applies `sesh_caseimport` to extract the needed data.
+3. Saves the extracted data as a .rds file that can be used later.
+
+This step needs to be performed several times for each sheet from which data needs to be extracted. That can be seen in `import.R`.
+
+Next, we move to the pre-analysis of demographic data.
+
+## Tabulating demographic data
+
+This code is in the `demographics.R` file. It performs three steps:
+
+1. Create a list of pre-generated datasets with the needed demographic data.
+2. Create three functions to classify the data, tabulate the categories, and export the new tables as .csv files.
+3. Apply the functions to the list of datasets.
+
+First, we write the list:
+
+```{r demographics.R p1, eval = FALSE}
+# List
+# This is the list of all tables to be used with the demographics script.
+# This list is consistent with the tables generated by import.R.
+tables <- list(
+  # Foodborne diseases
+  "Tables/fb_campy.rds", "Tables/fb_ecoli.rds", "Tables/fb_hepa.rds",
+    "Tables/fb_salm.rds", "Tables/fb_shig.rds",
+  # Vector-borne diseases
+  "Tables/vb_deng.rds", "Tables/vb_ehrl.rds", "Tables/vb_ence.rds",
+    "Tables/vb_lyme.rds", "Tables/vb_mala.rds", "Tables/vb_rick.rds",
+  # Vaccine-preventable diseases
+  "Tables/vp_hepaacute.rds", "Tables/vp_hepbchron.rds", "Tables/vp_hflu.rds",
+    "Tables/vp_pert.rds",
+  # STIs and HIV
+  "Tables/st_chla.rds", "Tables/st_gono.rds", "Tables/st_hiv.rds",
+  "Tables/st_syph.rds"
+)
+```
+
+Comments are included in `demographics.R` to make the table list easier to read, but they are not required.
+
+Next, we write the functions:
+
+```{r demographics.R p2, eval = FALSE}
+# Gender function
+# Generates a set of tables for gender breakdown for each disease.
+sesh_gender <- function(x){
+  readRDS(x) %>% 
+    mutate(gender = case_when(gender == "Male" ~ "Male",
+                              gender == "Female" ~ "Female",
+                              is.na(gender) ~ "Unknown",
+                              .default = "Unknown")) %>%
+    group_by(gender) %>% 
+    tally() %>% 
+    spread(gender, n) %>% 
+    mutate(total = rowSums(across(everything()))) %>% 
+    write_csv(paste0(
+      "Products/Counts/",
+      str_remove(x, "Tables/") %>% 
+        str_remove(".rds"),
+      "-gender.csv"
+    ))
+}
+
+
+# Age function
+# Creates age categories, then generates tables for age breakdowns by disease.
+sesh_age <- function(x){
+  readRDS(x) %>% 
+    mutate(age_g = case_when(age <= 4 ~ "0-4",
+                             age >= 5 & age <= 17 ~ "5-17",
+                             age >= 18 & age <= 24 ~ "18-24",
+                             age >= 25 & age <= 49 ~ "25-49",
+                             age >= 50 & age <= 64 ~ "50-64",
+                             age >= 65 ~ "65+",
+                             .default = "Unknown")) %>% 
+    mutate(age_g = factor(age_g, levels = c("0-4", "5-17",
+                                            "18-24", "25-49",
+                                            "50-64", "65+",
+                                            "Unknown"))) %>% 
+    group_by(age_g) %>% 
+    tally() %>% 
+    spread(age_g, n) %>% 
+    mutate(total = rowSums(across(everything()))) %>% 
+    write_csv(paste0(
+      "Products/Counts/",
+      str_remove(x, "Tables/") %>% 
+        str_remove(".rds"),
+      "-age.csv"
+    ))
+}
+
+
+# Race/ethnicity function
+# Creates race/ethnicity categories, then generates tables for race breakdowns.
+sesh_raceth <- function(x){
+  readRDS(x) %>% 
+    mutate(raceth = case_when(race == "White" ~ race,
+                              race == "Black or African American" ~ race,
+                              race == "Asian" ~ race,
+                              race == "Other" ~ race,
+                              race == "American Indian Alaskan Native" ~ "Other",
+                              race == "Native Hawaiian or Pacific Islander" ~ "Other",
+                              str_detect(race, ",") ~ "Two or more races",
+                              .default = "Unknown")) %>% 
+    mutate(raceth = factor(raceth, levels = c("Asian", "Black or African American",
+                                              "White", "Other", "Two or more races",
+                                              "Unknown"))) %>% 
+    group_by(raceth) %>% 
+    tally() %>% 
+    spread(raceth, n) %>% 
+    mutate(total = rowSums(across(everything()))) %>% 
+    write_csv(paste0(
+      "Products/Counts/",
+      str_remove(x, "Tables/") %>% 
+        str_remove(".rds"),
+      "-raceth.csv"
+    ))
+}
+```
+
+These three functions:
+
+1. Read the specified datasets.
+2. _Mutate_ (create) the `gender`, `age_g`, and `raceth` columns with standardized categories. This uses the `case_when()` function, which is essentially a cleaner way of writing a series of `if` and `else` expressions. For example, `race == "White" ~ race` says "if race is equal to 'White', use the value from race for raceth", and `race == "American Indian Alaskan Native" ~ "Other"` says "if race is equal to AIAN, use 'Other' as the value for raceth".
+3. _Mutate_ the `age_g` and `raceth` columns to be factors instead of character variables. This orders the data, which will make the exported tables more logical.
+4. Group the data using `group_by()`.
+5. _Tally_ the data according to the groups (`gender`, `age_g`, or `raceth`).
+6. _Spread_ the data so that the columns become the counts by group.
+7. _Mutate_ (create) a total column.
+8. Save the data as a .csv file. This function appears complicated, but it simply removes "Tables/" and ".rds" from the listing in the original table and adds the appropriate file path and file extension.
+
+Finally, we apply these three functions to all of the listed tables:
+
+```{r demographics.R p3, eval = FALSE}
+# Table generation
+# Apply above functions to list of tables
+lapply(tables, sesh_gender)
+lapply(tables, sesh_age)
+lapply(tables, sesh_raceth)
+```
+
+Each of these functions just say "apply the `sesh_...` function to each item in the list `tables`". This is a much faster and cleaner way of performing these three repetitive tasks than the alternative, which would be to write each of the three functions 19 times, changing the file names each time. It also allows for much more flexibility if diseases need to be added or removed from analysis.
+
+When the functions are applied, 57 tables are generated in `Products/Counts/`. They only contain a row of headers, which are the specified groups, and a row of counts.
+
+## Calculating incidence by ZIP code
+
+Last, in the `ratesbyzip.R` script, we calculate the incidence of specified diseases in each Wake County ZIP code. First, we read in exported population data from the American Community Survey:
+
+```{r ratesbyzip.R p1, eval = FALSE}
+# 2022 ACS Demographic Estimates for Wake County
+## Import sheet, remove extraneous data, and clean up
+acs <- read_xlsx("Tables/ACS demographic estimates 2022 by zip code.xlsx",
+                 sheet = "Data") %>%
+  mutate('ZCTA5 Age' = `...1`) %>% 
+  relocate(`ZCTA5 Age`) %>% 
+  select(starts_with("ZCTA5")) %>% 
+  rename_with(~str_remove(., "ZCTA5 ")) %>% 
+  filter(Age %in% c("10 to 14 years", "15 to 19 years", "20 to 24 years",
+                    "25 to 34 years", "35 to 44 years", "45 to 54 years",
+                    "55 to 59 years", "60 to 64 years", "65 to 74 years",
+                    "75 to 84 years", "85 years and over")) %>% 
+  mutate(across(!Age, ~str_remove(., ","))) %>% 
+  mutate(across(!Age, as.numeric))
+```
+
+This code imports the spreadsheet, performs some tricks (`mutate`, `relocate`, `select`, and `rename_with`) to select just the necessary columns, _filters_ to select just the rows with populations vulnerable to STIs, and _mutates_ the columns with population values to become numeric (without the included comma separators).
+
+Next, we total the populations across selected age groups and pivot the data so that each row is a ZIP code and a total vulnerable population:
+
+```{r ratesbyzip.R p2, eval = FALSE}
+## Total age groups >= 10 and pivot
+popbyzip <- acs %>% 
+  summarise(across(where(is.numeric), ~sum(., na.rm = TRUE))) %>% 
+  pivot_longer(everything(), names_to = "ZIP", values_to = "Population")
+```
+
+Then, we list the tables of real data we want to work with, similar to `demographics.R`:
+
+```{r ratesbyzip.R p3, eval = FALSE}
+# List
+## List line list tables for mapping
+tables <- list(
+  # STDs and HIV
+  "Tables/st_chla.rds", "Tables/st_gono.rds", "Tables/st_hiv.rds",
+  "Tables/st_syph.rds"
+)
+```
+
+Then, we create a function that calculates the incidence in each ZIP code:
+
+```{r ratesbyzip.R p4, eval = FALSE}
+# Rate by ZIP function
+## Creates tables to calculate rates from counts and populations
+sesh_ratebyzip <- function(x){
+  readRDS(x) %>% 
+    mutate(allZIP = as.numeric(
+      substr(as.character(zip), 1, 5)
+    )) %>% 
+    mutate(ZIP = case_when(allZIP %in% popbyzip$ZIP ~ allZIP,
+                           .default = 0)) %>% 
+    group_by(ZIP) %>% 
+    tally() %>% 
+    spread(ZIP, n) %>% 
+    pivot_longer(everything(), names_to = "ZIP", values_to = "Cases") %>%
+    mutate(ZIP = as.numeric(ZIP)) %>% 
+    right_join(popbyzip %>% 
+                 mutate(ZIP = as.numeric(ZIP)) %>% 
+                 add_row(ZIP = 0,
+                         Population = NA),
+               by = join_by(ZIP)) %>% 
+    mutate('Rate per 1000' = case_when(
+      ZIP == 0 ~ Cases,
+      .default = Cases / Population * 1000
+    )) %>% 
+    mutate(ZIP = case_when(ZIP == 0 ~ NA,
+                           .default = ZIP),
+           `Rate per 1000` = case_when(is.na(`Rate per 1000`) ~ 0,
+                                       .default = `Rate per 1000`)) %>% 
+    arrange(ZIP) %>% 
+    select(c(ZIP, `Rate per 1000`)) %>% 
+    write_csv(paste0(
+      "Products/Rates/",
+      str_remove(x, "Tables/") %>% 
+        str_remove(".rds"),
+      "-ratebyzip.csv"
+    ))
+}
+```
+
+This function performs the following steps:
+
+1. Read the specified disease's dataset.
+2. _Mutate_ `allZIP` from the `zip` column, removing any extra digits from the postal code (for instance, `27610-1808` becomes `27610`).
+3. _Mutate_ `ZIP` from `allZIP`, keeping the values of any ZIP code in Wake County (`allZIP %in% popbyzip$ZIP`) and setting any others to 0.
+4. _Group_, _tally_, and _spread_ counts across ZIP code columns.
+5. _Pivot_ the data so that each row is a ZIP code and a count.
+6. _Mutate_ ZIP to be numeric for ordering purposes.
+7. _Join_, or merge, the population data with the case data.
+8. _Mutate_ a new "Rate per 1000" column that calculates the incidence from cases and populations, but setting the value for "Rate per 1000" where there is no ZIP code to be the number of cases not in a Wake County ZIP.
+9. Edit the non-Wake ZIP row to have NA in the ZIP field, and edit any rows for ZIP codes with no cases to have a rate of 0.
+10. _Arrange_ (order) the entries by ZIP code, then select just the two needed columns.
+11. Save the table in the appropriate folder.
+
+Finally, we need to apply this function to the list of tables we specified earlier, similarly to `demographics.R`.
+
+```{r ratesbyzip.R p5, eval = FALSE}
+# Table generation
+## Apply above function to list of tables
+lapply(tables, sesh_ratebyzip)
+```
+
+Once this script is run, there are four exported .csv files with rates for each ZIP code and a row specifying the number of Wake cases that were not matched to a Wake ZIP code.
+
+## Generating counts and rates tables
+
+The notifiables data processed earlier is used to generate tables of counts and rates of communicable diseases for each of the last five years. To do this, R Markdown is used to create an HTML file (webpage) with each table. For the purposes of this report, those tables were exported to Microsoft Word and formatted there.
+
+To generate the counts and rates table, we need to load two libraries: `tidyverse`, as used before, and `kableExtra`, which provides some useful table formatting options. We also need to load the necessary data and make one small change: removing the "dz-" abbreviation from some disease names.
+
+```{r Notifiables-Table.Rmd p1, eval = FALSE}
+library(tidyverse)
+library(kableExtra)
+notif <- readRDS("../Tables/notifiables.rds") %>% 
+  select(c(disease, c2019, r2019, c2020, r2020, c2021, r2021, c2022, r2022, c2023, r2023)) %>% 
+  mutate(disease = str_remove(disease, "dz- "))
+```
+
+Then, we do a few setup tasks: changing an option so that any NA values will appear as two asterisks, creating a list of column headers (the final table will have a few header rows), and writing a function to generate the tables.
+
+```{r Notifiables-Table.Rmd p2, eval = FALSE}
+# Change NA fill value
+opts <- options(knitr.kable.NA = "**")
+
+# Set table column names
+cols <- c(
+  "Disease/Condition",
+  "No. of Cases", "Case Rate (+)",
+  "No. of Cases", "Case Rate (+)",
+  "No. of Cases", "Case Rate (+)",
+  "No. of Cases", "Case Rate (+)",
+  "No. of Cases", "Case Rate (+)"
+)
+
+# Create function to generate table
+sesh_kable <- function(x, dc){
+  x %>%
+    full_join(
+      read_csv("../Tables/categories.csv"),
+      by = join_by(disease)
+    ) %>% 
+    filter(category == dc) %>% 
+    select(!category) %>% 
+    kable(
+      format = "html",
+      align = "lcccccccccc",
+      format.args = list(big.mark = ",", scientific = FALSE),
+      col.names = cols
+    ) %>% 
+    add_header_above(
+      c(" " = 1, "All Statuses (Confirmed, Probable, and Suspect)" = 10)
+    ) %>% 
+    add_header_above(
+      c("Population:" = 1, "1,112,795" = 2, "1,129,393" = 2, "1,152,357" = 2,
+        "1,175,021" = 2, "data N/A" = 2 )
+    ) %>% 
+    add_header_above(
+      c(" " = 1, "2019" = 2, "2020" = 2, "2021" = 2, "2022" = 2, "2023" = 2)
+    ) %>% 
+    kable_styling(html_font = "arial", bootstrap_options = "striped")
+}
+```
+
+The function performs the following steps:
+
+1. _Join_ (match) the notifiables data to a list of disease categories so that each category can have its own table.
+2. _Filter_ the merged data to keep only the current category of interest (specified with the `dc` function argument).
+3. _Select_ to remove the disease category column from the data.
+4. Create a table (using `kable()`) in HTML format. The `align` option sets the alignment of the data within the columns (here, the first column is left-justified and the rest are centered). The `format.args` option here inserts comma separators and ensures no data is in scientific notation. The `col.names` argument uses the `cols` list we specified above to set the bottom row of column headers.
+5. Add three header rows, from bottom to top. First, we add a row that clarifies what case statuses are included in the table, which is centered over the 10 rows of numbers (`"All Statuses (Confirmed, Probable, and Suspect)" = 10`). Next, we add a row that centers the annual population over each case/rate pair of columns. Then, we add the top header, which specifies the year of each pair.
+6. Last, we specify some style choices: Arial font and striped rows.
+
+We then apply these functions within an R code chunk.
+
+```{r Notifiables-Table.Rmd p3, eval = FALSE}
+sesh_kable(notif, "vp")
+```
+
+For this function call, we specify the dataset we want to use (`notif`, loaded earlier) and the disease category we're interested in (in this case, vaccine-preventable diseases, abbreviated `"vp"`).
+
+Because we're working in R Markdown (and not just an R script), we are able to format a header and footnote around the table. We do that like so:
+
+```
+### Table 1: Vaccine-Preventable Diseases among Wake County Residents, 2019-2023
+
+{r code chunk here}
+
+(+)Rate per 100,000 population.
+
+**Case and rate data may not be available for all diseases in preliminary reporting.
+
+-Case Rate is not calculated when counts are too low.
+
+All statuses (confirmed, probable, and suspect cases) are reported in this section.
+```
+
+When we do this for each of the seven tables, we generate a nice-looking table in HTML that can be copied to Microsoft Word or used as-is. As an example, see the [output for the 2024 Communicable Disease Report](./Notifiables-Table.html).
+
+## Final notes
+
+This wraps up the R code contributed to the 2024 Communicable Disease Report. This code is also reusable with minor edits and can be applied to future reporting cycles. See the HOW-TO.docx document in the SharePoint for more information.

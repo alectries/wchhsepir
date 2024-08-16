@@ -1,0 +1,852 @@
+# STIs
+
+As a local health department, WCHHS has access to the North Carolina Electronic Disease Surveillance System (NC EDSS), which is a database that includes every case of a reportable condition in North Carolina. NC EDSS can generate a line list of every case of a reportable disease.
+
+For this section of the presentation, I've generated new graphics from line list data for chlamydia and gonorrhea, which are two of the top ten reportable conditions in Wake County and part of a concerning trend of increasing STI cases nationwide. The graphics display incidence proportions of chlamydia and gonorrhea over the last five years, stratified by age group, race, and municipality. Before the code for the graphs, I will walk through the process of filtering data to systematically exclude non-Wake cases and creating a `City_guess` variable to guess the municipality in case of typos.
+
+The data used for these reports is confidential and cannot be exported, so this portion of the presentation cannot be regenerated outside WCHHS systems. However, if you have access to the WCHHS Epidemiology SharePoint site, you can tweak and regenerate these graphs.
+
+## Libraries
+
+```{r Setup}
+suppressPackageStartupMessages(library(ezepi))
+suppressPackageStartupMessages(library(stringdist))
+```
+
+
+There are three non-standard libraries used in this script.
+
+1. `ezepi`, which I wrote outside of the practicum, is loaded here to use some specific functions I wrote for cleanliness. If you would like to use it, you can find installation instructions on [its GitHub page](https://github.com/alectries/ezepi).
+2. `tidyverse`, which is loaded here by the `ezepi` call.
+3. `stringdist`, short for string distance, which gives methods to evaluate how "distant" a _string_ (a character value) is from another string.
+
+## Importing chlamydia data
+
+Now, we import the data. The data are stored in ten separate .csv files: one for each year and disease. These files are slightly modified from the NC EDSS line list outputs to remove a few lines of unnecessary headers and the footnote at the bottom.
+
+First, we define the list of tables and write a function to import them all at once.
+
+```{r sesh_read}
+# List tables to import
+tables <- list("chla19", "chla20", "chla21", "chla22", "chla23")
+
+# Create a reader function
+sesh_read <- function(x){
+  read_csv(
+    paste0("../Data/", x, ".csv"),                        # Specify the file path
+    show_col_types = FALSE,                               # Prevent unnecessary output
+    col_types = "ncccccccncccccccccncccccccccccccccccncc" # Define column types in data
+  )
+}
+```
+
+With in `read_csv()`, we're performing two notable tasks:
+
+1. Using `paste0()` to add the folder (go up one folder, then into Data) and file extension (.csv) to the file name (`x`).
+2. Defining the column types. We define a few as numeric, such as the Event ID and the patient age, but we set most to character, including dates and ZIP codes. We'll fix dates in another step.
+
+Next, we use this function to import the data, then combine the five Chlamydia tables and fix some variables.
+
+```{r lapply and bind}
+# Apply the sesh_read function to the list of tables (importing five tables)
+chla <- lapply(
+  tables, sesh_read
+) %>% 
+  
+  # Combine the five tables into one
+  bind_rows() %>% 
+  
+  # Alter some variables
+  mutate(
+    "Create Date" = mdy(`Create Date`), # `mdy` tells R this is a date in month-day-year format
+    "Birthdate" = mdy(`Birthdate`),
+    "City" = toupper(City), # `toupper` changes the cities to all uppercase
+    "Symptom Onset Date" = mdy(`Symptom Onset Date`),
+    "Reporting Date to CDC" = mdy(`Reporting Date to CDC`),
+    "Diagnosis Date" = mdy(`Diagnosis Date`),
+    "Date Initial Report to PH" = mdy(`Date Initial Report to PH`),
+    "Date Identified as Contact" = mdy(`Date Identified as Contact`),
+    "Specimen Date" = mdy(`Specimen Date`),
+    "MMWR Date" = mdy(`MMWR Date`),
+    "Zip" = str_sub(Zip, 1, 5) # `str_sub` cuts ZIP codes down to just the first five digits
+  ) %>% 
+  
+  # Change the name of the Zip variable to ZIP
+  rename(ZIP = Zip)
+```
+
+Notice the use of the pipe (`%>%`) here: we perform several functions on the imported data and assign (with `<-`) the final product of our full expression to `chla` in the first row.
+
+See the code comments for explanations of what individual lines are doing.
+
+## Filtering data to exclude non-Wake cases
+
+WCHHS, as a very large metropolitan health department, frequently provides STI testing to clients who live outside Wake County. All test results performed in Wake, regardless of the patient's county of residence, are reported to Wake County through NC EDSS. To analyze trends in Wake alone, we need to systematically filter out non-Wake cases.
+
+In this script, to filter out non-Wake cases, I used three fields: reported county, ZIP, and city. Cases needed to have a match in at least one of these three fields to be included. For County, only Wake County (or NA) was accepted. For City and ZIP, this code was used:
+
+```{r accepted lists}
+# Pull the list of accepted ZIP codes from wake_zips.csv
+zips <- read_csv("wake_zips.csv", show_col_types = FALSE, col_types = "c")
+
+# Set the list of accepted cities
+cities <- c("Apex", "Cary", "Fuquay", "Fuquay-Varina", "Garner",
+            "Holly Springs", "Knightdale", "Morrisville", "Raleigh",
+            "Rolesville", "Wake Forest", "Wendell", "Zebulon",
+            "Durham", "Angier") %>% 
+  
+  # Convert the list to uppercase (to match the City field in the data)
+  toupper()
+```
+
+Next, we write the function to filter the data.
+
+```{r chla_filtered}
+chla_filtered <- chla %>% 
+  mutate(
+    
+    # Create the "del" (delete) variable to mark cases for deletion
+    "del" = case_when(
+      
+      # If county is not Wake or NA, mark for deletion
+      !is.na(County) & County != "Wake County" ~ TRUE,
+      
+      # If ZIP is not a Wake ZIP or NA and the county is not given, mark for deletion
+      !is.na(ZIP) & !(ZIP %in% zips$ZIP) & is.na(County) ~ TRUE,
+      
+      # If city is not a Wake municipality or NA and the county is not given, mark for deletion
+      !is.na(City) & !(
+        stringdistmatrix(chla$City, cities, method = "lv") %>% 
+          apply(1, function(row){any(row <= 5)})
+      ) & is.na(County) ~ TRUE,
+      
+      # If county, ZIP, and city are all NA, mark for deletion
+      is.na(County) & is.na(ZIP) & is.na(City) ~ TRUE,
+      
+      # Otherwise, mark to keep
+      .default = FALSE
+    ),
+    
+    # Create a variable that guesses (fixes typos in) the city column
+    "City_guess" = map_chr(City, function(city){
+      
+      # If the city is in Wake and spelled correctly, keep it as is
+      if(city %in% cities){
+        return(city)
+        
+        # If there is no city given, don't guess (say NA)
+      } else if(is.na(city)){
+        return(NA_character_)
+        
+        # Otherwise, compare to Wake cities and pick the best match
+      } else {
+      distances <- stringdist(city, cities, method = "lv")
+      best_match <- cities[which.min(distances)]
+      return(best_match)
+      }
+    })
+  ) %>% 
+  mutate(
+    
+    # Make manual edits to the city guess
+    "City_guess" = case_when(
+      
+      # If the city isn't given in the data, set the guess to "OTHER"
+      is.na(City) ~ "OTHER",
+      
+      # If the city guess was Fuquay (common shorthand), use the full name
+      City_guess == "FUQUAY" ~ "FUQUAY-VARINA",
+      
+      # If the city was Wake, set the guess to "OTHER"
+      City == "WAKE" ~ "OTHER",
+      
+      # If the city was RaleighRaleigh (common typo), set the guess to "RALEIGH"
+      City == "RALEIGHRALEIGH" ~ "RALEIGH",
+      
+      # If the guess is too different from the original, set the guess to "OTHER"
+      stringdist(City, City_guess, method = "lv") > 3 ~ "OTHER",
+      
+      # If none of the above apply, do not alter the guess
+      .default = City_guess
+    )
+  ) %>% 
+  
+  # Move the guess variable next to the city variable in the data (for convenience)
+  relocate(City_guess, .after = City) %>% 
+  
+  # Filter cases, keeping only those NOT marked for deletion
+  filter(del == FALSE) %>% 
+  
+  # Remove the deletion marker variable
+  select(!del)
+```
+
+See the comments in the above code for a complete description of its function. Some key notes about the use of `stringdist` to guess and match cities:
+
+1. `stringdist` has multiple algorithm options. For this task, I used Levenshtein distance (`lv`), which simply counts the number of deletions, insertions, and substitutions needed to convert one string to another.
+2. When marking cases for deletion, I chose to set the maximum distance between the city and the nearest guess to 5. This was chosen through trial and error with the data and is arbitrary; use whatever cutoff works best on the data you're working with.
+3. When guessing the closest city, however, I chose a cutoff of 3. Again, this was based on trial and error. A more specific cutoff for the city guess is sensible because it only impacts how data is classified, not whether it is included.
+
+Additionally, because it is somewhat hard to parse, here is the logic (in words) for how cases are selected for deletion:
+
+IF...
+
+1. the county is defined but is not Wake, THEN delete (set `del` to TRUE).
+2. the ZIP is defined but is not in `wake_zips` AND the county is undefined, THEN delete.
+3. the city is defined but is not within 5 substitutions, insertions, and deletions of any municipality in `cities` AND the county is undefined, THEN delete.
+4. the county, ZIP code, and city are all undefined, THEN delete.
+5. ELSE keep the case (set `del` to FALSE).
+
+## Loading census data
+
+Next, we need to load census data for age and race/ethnicity to calculate incidence. The included `census_18-22.csv` spreadsheet is a combination of ACS[^03-sti-1] and Census[^03-sti-2] demographic data from 2018-2022. Data has been manually combined and calculated (where possible) so that the differing fields between the ACS and Census are comparable.
+
+[^03-sti-1]: The American Community Survey (ACS) is a survey tool from the United States Census Bureau. For 2018, 2019, 2021, and 2022, table [DP05 (ACS Demographic and Housing Estimates)](https://data.census.gov/table/ACSDP1Y2022.DP05?q=acs%20population) was used.
+
+[^03-sti-2]: The Decennial Census is performed every ten years by the United States Census Bureau. For 2020, table [DP1 (Profile of General Population and Housing Characteristics)](https://data.census.gov/table/DECENNIALDP2020.DP1?q=dp1&g=050XX00US37183) was used.
+
+### Loading age data
+
+```{r census age}
+
+# Read in the spreadsheet and set all column types to character
+census_age <- read_csv("census_18-22.csv",
+                       col_types = "cccccc",
+                       show_col_types = FALSE) %>% 
+  
+  # Select only the rows with age data
+  slice(., 6:28, 30:35, 43) %>% 
+  
+  # Remove the comma separators from numbers and set them to numeric
+  mutate(
+    "2018" = as.numeric(str_remove_all(`2018`, ",")),
+    "2019" = as.numeric(str_remove_all(`2019`, ",")),
+    "2020" = as.numeric(str_remove_all(`2020`, ",")),
+    "2021" = as.numeric(str_remove_all(`2021`, ",")),
+    "2022" = as.numeric(str_remove_all(`2022`, ","))
+  ) %>% 
+  
+  # Define and calculate population totals for custom age groups
+  mutate_rows(
+    "5 to 17 years" = `Total population` - `18 years and over`,
+    "18 to 24 years" = `Under 5 years` + `5 to 9 years` + `10 to 14 years` + `15 to 19 years` + `20 to 24 years` - `Under 18 years`,
+    "25 to 44 years" = `25 to 34 years` + `35 to 44 years`,
+    "45 to 64 years" = `45 to 54 years` + `55 to 59 years` + `60 to 64 years`
+  ) %>% 
+  
+  # Add a column for 2023 with the same population as 2022
+  mutate("2023" = `2022`) %>% 
+  
+  # Pivot the dataset to merge later
+  pivot_longer(
+    cols = -Label,
+    names_to = "Year",
+    names_transform = as.numeric,
+    values_to = "Population"
+  )
+```
+
+See the comments in the code for specific steps. One note: `mutate_rows()`, though it looks like a `tidyverse` function, is actually an `ezepi` function. Make sure to load `ezepi` if you want to use it in other scripts.
+
+### Loading race and ethnicity data
+
+```{r census race}
+census_raceth <- read_csv("census_18-22.csv",
+                          col_types = "cccccc",
+                          show_col_types = FALSE) %>% 
+  slice(., 43:48, 53, 61, 66, 80) %>% 
+  mutate(
+    "2018" = as.numeric(str_remove_all(`2018`, ",")),
+    "2019" = as.numeric(str_remove_all(`2019`, ",")),
+    "2020" = as.numeric(str_remove_all(`2020`, ",")),
+    "2021" = as.numeric(str_remove_all(`2021`, ",")),
+    "2022" = as.numeric(str_remove_all(`2022`, ","))
+  ) %>% 
+  mutate("2023" = `2022`) %>%
+  pivot_longer(
+    cols = -Label,
+    names_to = "Year",
+    names_transform = as.numeric,
+    values_to = "Population"
+  )
+```
+
+This section is similar to the above section, so comments are not included.
+
+## Tally cases by group and calculate incidence
+
+Now, we need to group and count the line list data by age, race, and municipality. We will calculate incidence for age and race and display counts for municipality.
+
+### Chlamydia incidence by age group
+
+First, we'll do this by age group.
+
+```{r chla age tally}
+# Start with the filtered data
+chla_age <- chla_filtered %>% 
+  
+  # Create some variables
+  mutate(
+    
+    # Variable for census age groups (5/10 year groups)
+    census_age = factor(
+      # Use `case_when()` (see note) to determine the values
+      x = case_when(
+        Age < 5 ~ "Under 5 years",
+        Age >= 5 & Age <= 9 ~ "5 to 9 years",
+        Age >= 10 & Age <= 14 ~ "10 to 14 years",
+        Age >= 15 & Age <= 19 ~ "15 to 19 years",
+        Age >= 20 & Age <= 24 ~ "20 to 24 years",
+        Age >= 25 & Age <= 34 ~ "25 to 34 years",
+        Age >= 35 & Age <= 44 ~ "35 to 44 years",
+        Age >= 45 & Age <= 54 ~ "45 to 54 years",
+        Age >= 55 & Age <= 59 ~ "55 to 59 years",
+        Age >= 60 & Age <= 64 ~ "60 to 64 years",
+        Age >= 65 & Age <= 74 ~ "65 to 74 years",
+        Age >= 75 & Age <= 84 ~ "75 to 84 years",
+        Age >= 85 ~ "85 years and over"
+      ),
+      # Set the factor's levels (to order them)
+      levels = c("Under 5 years", "5 to 9 years", "10 to 14 years",
+                 "15 to 19 years", "20 to 24 years", "25 to 34 years",
+                 "35 to 44 years", "45 to 54 years", "55 to 59 years",
+                 "60 to 64 years", "65 to 74 years", "75 to 84 years")
+    ),
+    
+    # Variable for six age groups (more standard)
+    age_6 = case_when(
+        Age < 5 ~ "Under 5 years",
+        Age >= 5 & Age < 18 ~ "5 to 17 years",
+        Age >= 18 & Age < 25 ~ "18 to 24 years",
+        Age >= 25 & Age < 45 ~ "25 to 44 years",
+        Age >= 45 & Age < 65 ~ "45 to 64 years",
+        Age >= 65 ~ "65 years and over"
+    ),
+    
+    # Variable for the year when the case occurred
+    Year = year(`MMWR Date`)
+  ) %>% 
+  
+  # Group by case year and age group
+  group_by(Year, age_6) %>% 
+  
+  # Tally (count) the cases in each group
+  tally(name = "Count") %>% 
+  
+  # Fill in any year/age combos with no cases
+  complete(fill = list(Count = 0)) %>% 
+  
+  # Filter out groups with no age
+  filter(!is.na(age_6)) %>% 
+  
+  # Join (merge) the tallied data with the population totals
+  left_join(
+    census_age,
+    by = join_by(age_6 == Label, Year)
+  ) %>% 
+  
+  # Calculate the incidence for each year/age group
+  mutate("Incidence" = Count / Population * 100000,
+         
+         # Change the age group variable to a factor (for ordering)
+         "age_6" = factor(
+           x = age_6,
+           levels = c("Under 5 years", "5 to 17 years",
+                      "18 to 24 years", "25 to 44 years",
+                      "45 to 64 years", "65 years and over")
+         ))
+```
+
+See the code comments for complete details, but to summarize, this block does the following:
+
+1. _Mutate_ (create) age grouping variables and a year variable based on existing variables.
+2. _Group_ by year and age group.
+3. _Tally_ (count) the cases in each group.
+4. Fill in any missing groups with zeroes and filter out undefined age groups.
+5. _Join_ (merge) the tallied data and the population data
+6. Calculate incidence and order the age grouping variable
+
+`case_when()` is a very useful function from the tidyverse that makes if/else statements more compact. Each line in this example is an if/then statement, and each comma means "else". The function also includes an option, `.default`, that is the final "else" with no "if". For more information, see the [dplyr help page](https://dplyr.tidyverse.org/reference/case_when.html) or type `?case_when` with `tidyverse` loaded.
+
+### Chlamydia incidence by race
+
+Next, we'll do it by race.
+
+```{r chla race tally}
+chla_race <- chla_filtered %>% 
+  mutate(
+    "race_5" = case_when(
+        Race == "White" ~ "White",
+        Race == "Black or African American" 
+          ~ "Black or African American",
+        Race == "Asian" ~ "Asian",
+        str_detect(Race, ",") ~ "Two or more races",
+        Race == "Unknown" | is.na(Race) ~ NA,
+        .default = "Some other race"
+    ),
+    Year = year(`MMWR Date`)
+  ) %>% 
+  group_by(Year, race_5) %>% 
+  tally(name = "Count") %>% 
+  complete(fill = list(Count = 0)) %>% 
+  filter(!is.na(race_5)) %>% 
+  left_join(
+    census_raceth,
+    by = join_by(race_5 == Label, Year)
+  ) %>% 
+  mutate("Incidence" = Count / Population * 100000,
+         "race_5" = factor(
+           x = race_5,
+           levels = c("Asian", "Black or African American", "White",
+                      "Some other race", "Two or more races")
+         ))
+```
+
+This code block is similar, so code comments are not included.
+
+### Chlamydia count by municipality
+
+Last, we'll calculate counts by municipality in Wake County. Incidence is not calculated here because of the difficulty of determining whether a case lives within city limits.
+
+```{r chla city tally}
+# Start with the filtered data
+chla_city <- chla_filtered %>% 
+  
+  # Create a variable for the year when the case occurred
+  mutate(Year = year(`MMWR Date`)) %>% 
+  
+  # Group by year and city (determined algorithmically)
+  group_by(Year, City_guess) %>% 
+  
+  # Tally (count) the cases in each group
+  tally(name = "Count") %>% 
+  
+  # Fill in any year/age combos with no cases
+  complete(fill = list(Count = 0)) %>% 
+  
+  # Filter out groups with no city
+  filter(!is.na(City_guess)) %>% 
+  
+  # Suppress year/city values with 5 or fewer cases
+  mutate(
+    "Count" = case_when(
+      Count <= 5 ~ NA,
+      .default = Count
+    )
+  )
+```
+
+See the code comments for details. Some notable changes from the prior versions:
+
+1. Municipalities do not need to be combined into groups, so there is no mutate for that.
+2. Because some municipalities (or the portion of them inside Wake) are small, counts of 5 or fewer are suppressed to protect anonymity.
+
+## Graphing chlamydia
+
+Finally, we create the graphics. These are best represented as bar graphs, though line graphs with multiple lines may also be appropriate.
+
+### Chlamydia incidence by age group
+
+Since the data is already prepared for us, we just need to code the graph. We do this using `ggplot2`, part of the `tidyverse` package.
+
+```{r chla age}
+# Set up the plot, specifying dataset and variables
+ggplot(
+  chla_age,
+  aes(x = age_6, y = Incidence, fill = as.character(Year))
+) +
+  
+  # Use a bar (column) graph with multiple bars for each age group
+  geom_col(position = position_dodge()) +
+  
+  # Set the color scheme (using RColorBrewer)
+  scale_fill_brewer(palette = "Set2") +
+  
+  # Set the axis and legend labels
+  labs(
+    x = "Age group",
+    y = "Cases per 100k population",
+    fill = "Year"
+  ) +
+  
+  # Set the ggplot theme
+  theme_minimal() +
+  
+  # Set the plot title
+  ggtitle("Chlamydia Incidence by Age Group in Wake County, 2019-2023") +
+  
+  # Center the plot title and put the legend on the bottom
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "bottom"
+  )
+```
+
+This bar graph shows the incidence (sometimes called rate) of chlamydia in each age group over the prior five years. If you'd like, you can open this RMarkdown file (03-STI.Rmd) on the SharePoint and play with the graph code to edit the settings.
+
+```{r note to colleagues, echo = FALSE}
+# If you've made it here, hello! Thank you all for such a great practicum.
+
+#You can edit the code in the chunk above. I recommend clicking Run > Run All first, then editing the code, then hitting the "play" button at the top right corner of that box. You won't mess up the book by playing with the graph code, but it might be a good idea to avoid saving so you can change it back when you're done. Don't hit Knit!
+
+# - Alec
+```
+
+### Chlamydia incidence by race
+
+Now we graph by race:
+
+```{r chla race}
+ggplot(
+  chla_race,
+  aes(x = race_5, y = Incidence, fill = as.character(Year))
+) +
+  geom_col(position = position_dodge()) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    x = "Race",
+    y = "Cases per 100k population",
+    fill = "Year"
+  ) +
+  theme_minimal() +
+  ggtitle("Chlamydia Incidence by Race in Wake County, 2019-2023") +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "bottom"
+  )
+```
+
+This is practically the same as the age graph, so the code should be familiar.
+
+### Chlamydia count by municipality
+
+Finally, we'll make a counts graph for municipalities. This would look _really_ ugly if it were the same orientation, so let's graph it sideways!
+
+```{r chla city, warning = FALSE}
+# Set up the graph
+ggplot(
+  # Specify the dataset
+  chla_city,
+  aes(
+    x = Count,                      # Count on the x-axis
+    y = fct_rev(City_guess),        # Reversed city on y (to alphabetize)
+    fill = fct_rev(as.factor(Year)) # Reversed year (to order top to bottom)
+  )
+) +
+  
+  # Use a bar (column) graph with multiple bars for each age group
+  geom_col(position = position_dodge()) +
+  
+  # Set the axis and legend labels
+  labs(
+    x = "Cases",
+    y = "Municipality",
+    fill = "Year"
+  ) +
+  
+  # Set the color scheme (using RColorBrewer) and flip the legend
+  scale_fill_brewer(palette = "Set2",
+                    guide = guide_legend(reverse = TRUE)) +
+  
+  # Set the ggplot theme
+  theme_minimal() +
+  
+  # Set the plot title
+  ggtitle("Chlamydia Count by Municipality in Wake County, 2019-2023") +
+  
+  # Center the plot title and put the legend on the bottom
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "bottom"
+  )
+```
+
+This graph shows the counts of chlamydia each year for each Wake County municipality. Of course, because of population, Raleigh overtakes the graph. We can also filter Raleigh out using this code:
+
+```{r chla city 2, warning = FALSE}
+ggplot(
+  chla_city %>% 
+    filter(City_guess != "RALEIGH"), # Pipe the data into a filter
+  aes(
+    x = Count,
+    y = fct_rev(City_guess),
+    fill = fct_rev(as.factor(Year))
+  )
+) +
+  geom_col(position = position_dodge()) +
+  labs(
+    x = "Cases",
+    y = "Municipality",
+    fill = "Year"
+  ) +
+  scale_fill_brewer(palette = "Set2", guide = guide_legend(reverse = TRUE)) +
+  theme_minimal() +
+  ggtitle("Chlamydia Count by Municipality in Wake County, 2019-2023") +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "bottom"
+  )
+```
+
+Now, we can see a bit more detail for the other municipalities' counts.
+
+## Tallying and graphing gonorrhea
+
+Of course, there are two diseases we'd like to analyze here. Next, we'll analyze gonorrhea. Since this code is practically the same as for chlamydia, I'll avoid explanations and just include the code.
+
+### Importing
+
+```{r gono import}
+# Import data
+tables <- list("gono19", "gono20", "gono21", "gono22", "gono23")
+
+sesh_read <- function(x){
+  read_csv(
+    paste0("../Data/", x, ".csv"),
+    show_col_types = FALSE,
+    col_types = "ncccccccncccccccccncccccccccccccccccncc"
+  )
+}
+
+gono <- lapply(
+  tables, sesh_read
+) %>% 
+  bind_rows() %>% 
+  mutate(
+    "Create Date" = mdy(`Create Date`),
+    "Birthdate" = mdy(`Birthdate`),
+    "City" = toupper(City),
+    "Symptom Onset Date" = mdy(`Symptom Onset Date`),
+    "Reporting Date to CDC" = mdy(`Reporting Date to CDC`),
+    "Diagnosis Date" = mdy(`Diagnosis Date`),
+    "Date Initial Report to PH" = mdy(`Date Initial Report to PH`),
+    "Date Identified as Contact" = mdy(`Date Identified as Contact`),
+    "Specimen Date" = mdy(`Specimen Date`),
+    "MMWR Date" = mdy(`MMWR Date`),
+    "Zip" = str_sub(Zip, 1, 5)
+  ) %>% 
+  rename(ZIP = Zip)
+```
+
+### Filtering
+
+```{r gono filter}
+# Filter out non-Wake cases
+zips <- read_csv("wake_zips.csv", show_col_types = FALSE, col_types = "c")
+
+cities <- c("Apex", "Cary", "Fuquay-Varina", "Fuquay", "Garner", "Holly Springs", "Knightdale", "Morrisville",
+            "Raleigh", "Rolesville", "Wake Forest", "Wendell", "Zebulon", "Durham", "Angier") %>% 
+  toupper()
+
+gono_filtered <- gono %>% 
+  mutate(
+    "del" = case_when(
+      !is.na(County) & County != "Wake County" ~ TRUE,
+      !is.na(ZIP) & !(ZIP %in% zips$ZIP) & is.na(County) ~ TRUE,
+      !is.na(City) & !(
+        stringdistmatrix(gono$City, cities, method = "lv") %>% 
+          apply(1, function(row){any(row <= 5)})
+      ) & is.na(County) ~ TRUE,
+      is.na(County) & is.na(ZIP) & is.na(City) ~ TRUE,
+      .default = FALSE
+    ),
+    "City_guess" = map_chr(City, function(city){
+      if(city %in% cities){
+        return(city)
+      } else if(is.na(city)){
+        return(NA_character_)
+      } else {
+      distances <- stringdist(city, cities, method = "lv")
+      best_match <- cities[which.min(distances)]
+      return(best_match)
+      }
+    })
+  ) %>% 
+  mutate(
+    "City_guess" = case_when(
+      is.na(City) ~ "OTHER",
+      City_guess == "FUQUAY" ~ "FUQUAY-VARINA",
+      City == "WAKE" ~ "OTHER",
+      City == "RALEIGHRALEIGH" ~ "RALEIGH",
+      stringdist(City, City_guess, method = "lv") > 3 ~ "OTHER",
+      .default = City_guess
+    )
+  ) %>% 
+  relocate(City_guess, .after = City) %>% 
+  filter(del == FALSE) %>% 
+  select(!del)
+```
+
+### Tallying
+
+```{r gono tally}
+# Tally Wake cases by age, race, and city, then calculate incidence
+gono_age <- gono_filtered %>% 
+  mutate(
+    census_age = factor(
+      x = case_when(
+        Age < 5 ~ "Under 5 years",
+        Age >= 5 & Age <= 9 ~ "5 to 9 years",
+        Age >= 10 & Age <= 14 ~ "10 to 14 years",
+        Age >= 15 & Age <= 19 ~ "15 to 19 years",
+        Age >= 20 & Age <= 24 ~ "20 to 24 years",
+        Age >= 25 & Age <= 34 ~ "25 to 34 years",
+        Age >= 35 & Age <= 44 ~ "35 to 44 years",
+        Age >= 45 & Age <= 54 ~ "45 to 54 years",
+        Age >= 55 & Age <= 59 ~ "55 to 59 years",
+        Age >= 60 & Age <= 64 ~ "60 to 64 years",
+        Age >= 65 & Age <= 74 ~ "65 to 74 years",
+        Age >= 75 & Age <= 84 ~ "75 to 84 years",
+        Age >= 85 ~ "85 years and over"
+      ),
+      levels = c("Under 5 years", "5 to 9 years", "10 to 14 years", "15 to 19 years",
+                "20 to 24 years", "25 to 34 years", "35 to 44 years",
+                "45 to 54 years", "55 to 59 years", "60 to 64 years",
+                "65 to 74 years", "75 to 84 years")
+    ),
+    age_6 = case_when(
+        Age < 5 ~ "Under 5 years",
+        Age >= 5 & Age < 18 ~ "5 to 17 years",
+        Age >= 18 & Age < 25 ~ "18 to 24 years",
+        Age >= 25 & Age < 45 ~ "25 to 44 years",
+        Age >= 45 & Age < 65 ~ "45 to 64 years",
+        Age >= 65 ~ "65 years and over"
+    ),
+    Year = year(`MMWR Date`)
+  ) %>% 
+  group_by(Year, age_6) %>% 
+  tally(name = "Count") %>% 
+  complete(fill = list(Count = 0)) %>% 
+  filter(!is.na(age_6)) %>% 
+  left_join(
+    census_age,
+    by = join_by(age_6 == Label, Year)
+  ) %>% 
+  mutate("Incidence" = Count / Population * 100000,
+         "age_6" = factor(
+           x = age_6,
+           levels = c("Under 5 years", "5 to 17 years", "18 to 24 years",
+                      "25 to 44 years", "45 to 64 years", "65 years and over")
+         ))
+
+gono_race <- gono_filtered %>% 
+  mutate(
+    "race_5" = case_when(
+        Race == "White" ~ "White",
+        Race == "Black or African American" ~ "Black or African American",
+        Race == "Asian" ~ "Asian",
+        str_detect(Race, ",") ~ "Two or more races",
+        Race == "Unknown" | is.na(Race) ~ NA,
+        .default = "Some other race"
+    ),
+    Year = year(`MMWR Date`)
+  ) %>% 
+  group_by(Year, race_5) %>% 
+  tally(name = "Count") %>% 
+  complete(fill = list(Count = 0)) %>% 
+  filter(!is.na(race_5)) %>% 
+  left_join(
+    census_raceth,
+    by = join_by(race_5 == Label, Year)
+  ) %>% 
+  mutate("Incidence" = Count / Population * 100000,
+         "race_5" = factor(
+           x = race_5,
+           levels = c("Asian", "Black or African American", "White",
+                      "Some other race", "Two or more races")
+         ))
+
+gono_city <- gono_filtered %>% 
+  mutate(Year = year(`MMWR Date`)) %>% 
+  group_by(Year, City_guess) %>% 
+  tally(name = "Count") %>% 
+  complete(fill = list(Count = 0)) %>% 
+  filter(!is.na(City_guess)) %>% 
+  mutate(
+    "Count" = case_when(
+      Count <= 5 ~ NA,
+      .default = Count
+    )
+  )
+```
+
+### Graphing gonorrhea incidence by age group
+
+```{r gono age}
+ggplot(
+  gono_age,
+  aes(x = age_6, y = Incidence, fill = as.character(Year))
+) +
+  geom_col(position = position_dodge()) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    x = "Age group",
+    y = "Cases per 100k population",
+    fill = "Year"
+  ) +
+  theme_minimal() +
+  ggtitle("Gonorrhea Incidence by Age Group in Wake County, 2019-2023") +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "bottom"
+  )
+```
+
+### Graphing gonorrhea incidence by race
+
+```{r gono race}
+ggplot(
+  gono_race,
+  aes(x = race_5, y = Incidence, fill = as.character(Year))
+) +
+  geom_col(position = position_dodge()) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    x = "Race",
+    y = "Cases per 100k population",
+    fill = "Year"
+  ) +
+  theme_minimal() +
+  ggtitle("Gonorrhea Incidence by Race in Wake County, 2019-2023") +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "bottom"
+  )
+```
+
+### Graphing gonorrhea count by municipality
+
+```{r gono city, warning = FALSE}
+ggplot(
+  gono_city,
+  aes(
+    x = Count,
+    y = fct_rev(City_guess),
+    fill = fct_rev(as.factor(Year))
+  )
+) +
+  geom_col(position = position_dodge()) +
+  labs(
+    x = "Cases",
+    y = "Municipality",
+    fill = "Year"
+  ) +
+  scale_fill_brewer(palette = "Set2", guide = guide_legend(reverse = TRUE)) +
+  theme_minimal() +
+  ggtitle("Gonorrhea Count by Municipality in Wake County, 2019-2023") +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "bottom"
+  )
+```
+
+## Final notes
+
+This analysis produced six graphs, which give useful information for conclusions.
+
+1. Risk of chlamydia and gonorrhea is highest by far for residents aged 18 to 24.
+2. Though there is discussion of high nursing home transmission of STIs, case data from 2019 to 2023 do not demonstrate a concern in the 65 years and over age group.
+3. Black and African American residents are at higher risk for chlamydia and gonorrhea, and both appear to be sharply increasing. White, Asian, and multiracial residents appear to be at low risk, while residents of other races (including American Indian/Alaska Native and Native Hawaiian/Pacific Islander) are at elevated risk.
+4. Raleigh accounts for most STI cases, and its cases are rising. Cases in most other municipalities are not trending in any particular direction, with some seeing a slight increase.
+
+This kind of analysis can be very illustrative, and it would likely benefit other Wake County programs. R makes the process of analyzing line list data in this way much faster and repeatable.

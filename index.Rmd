@@ -1,0 +1,27 @@
+--- 
+title: "In-Service Presentation, August 2024"
+author: "Alec Higgins"
+date: "August 1, 2024"
+site: bookdown::bookdown_site
+documentclass: book
+bibliography: [book.bib, packages.bib]
+link-citations: yes
+---
+
+# About {-}
+
+This presentation was developed by Alec Higgins for the Epidemiology Program at Wake County Health and Human Services (WCHHS) as part of a practicum supported by the University of North Carolina (UNC) Gillings School of Global Public Health. It also serves as a portfolio of work done for the Epidemiology Program during the practicum.
+
+The presentation is given in a book format, generated in R, both as a demonstration of Bookdown's capabilities and as a more convenient reference for future use.
+
+Thanks to Morgan Poole, Akanksha Acharya, Marlene Kurt, and Katie LaWall for their support throughout this practicum.
+
+## Sections {-}
+
+This presentation is organized by project, so R methods can be seen in the context of their uses. The following sections are included in the presentation:
+
+1. **2024 CD Report**: This section demonstrates the code used to standardize, condense, and export data generated for WCHHS' 2024 Communicable Disease Report. It primarily uses R scripts but includes some R Markdown to generate the tables.
+2. **2024 MCH Report**: This section shows the code used to generate simple graphics for WCHHS' 2024 Maternal and Child Health Report. It uses an R script and R Markdown.
+3. **STI**: This section demonstrates the import, processing, and classification of line list data on sexually transmitted infection (STIs) with graphics generated from the data. It is written entirely in R Markdown.
+4. **Respiratory Viruses**: This section walks through the code used to automate the regular development of a PowerPoint presentation, with graphics, from line list data exported from NC DETECT. It is written in R Markdown to generate a Quarto presentation (in PowerPoint format).
+5. **Bookdown**: The final section is a foray into the meta with a brief explanation of this presentation format itself.
